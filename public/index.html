@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arduino 데이터 모니터링</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s;
+        }
+        
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .card h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+        
+        .value-display {
+            font-size: 3rem;
+            font-weight: bold;
+            text-align: center;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 10px 0;
+            transition: all 0.3s;
+        }
+        
+        .value-0 {
+            background: #ff6b6b;
+            color: white;
+        }
+        
+        .value-1 {
+            background: #51cf66;
+            color: white;
+        }
+        
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 15px;
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+        
+        .data-table {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: #667eea;
+            color: white;
+            padding: 10px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+        }
+        
+        td {
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+        }
+        
+        .status.connected {
+            background: #51cf66;
+            color: white;
+        }
+        
+        .status.disconnected {
+            background: #ff6b6b;
+            color: white;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔌 Arduino 실시간 데이터 모니터링</h1>
+        
+        <div class="dashboard">
+            <!-- 현재 값 표시 -->
+            <div class="card">
+                <h2>현재 값 <span id="connection-status" class="status disconnected">연결 중...</span></h2>
+                <div id="current-value" class="value-display value-0">-</div>
+                <div class="stats">
+                    <div class="stat-item">
+                        <div class="stat-value" id="count-ones">0</div>
+                        <div class="stat-label">1의 개수</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="count-zeros">0</div>
+                        <div class="stat-label">0의 개수</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 통계 정보 -->
+            <div class="card">
+                <h2>통계 정보</h2>
+                <div class="stats">
+                    <div class="stat-item">
+                        <div class="stat-value" id="total-records">0</div>
+                        <div class="stat-label">전체 기록</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="last-update">-</div>
+                        <div class="stat-label">마지막 업데이트</div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="valueChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 최근 데이터 테이블 -->
+        <div class="card">
+            <h2>최근 데이터 (최대 20개)</h2>
+            <div class="data-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>값</th>
+                            <th>Arduino 시간</th>
+                            <th>서버 시간</th>
+                        </tr>
+                    </thead>
+                    <tbody id="data-tbody">
+                        <tr><td colspan="4" style="text-align: center;">데이터를 기다리는 중...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Socket.IO 연결
+        const socket = io();
+        let recentData = [];
+        let chart = null;
+        
+        // 연결 상태 업데이트
+        socket.on('connect', () => {
+            document.getElementById('connection-status').textContent = '연결됨';
+            document.getElementById('connection-status').className = 'status connected';
+            loadInitialData();
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('connection-status').textContent = '연결 끊김';
+            document.getElementById('connection-status').className = 'status disconnected';
+        });
+        
+        // 새 데이터 수신
+        socket.on('newData', (data) => {
+            updateCurrentValue(data.value);
+            addToTable(data);
+            updateStats();
+            updateChart(data);
+        });
+        
+        // 현재 값 업데이트
+        function updateCurrentValue(value) {
+            const element = document.getElementById('current-value');
+            element.textContent = value;
+            element.className = `value-display value-${value}`;
+        }
+        
+        // 테이블에 데이터 추가
+        function addToTable(data) {
+            const tbody = document.getElementById('data-tbody');
+            
+            // 첫 데이터인 경우 "기다리는 중" 메시지 제거
+            if (tbody.rows.length === 1 && tbody.rows[0].cells[0].colSpan === 4) {
+                tbody.innerHTML = '';
+            }
+            
+            // 새 행 추가
+            const row = tbody.insertRow(0);
+            row.innerHTML = `
+                <td>${data.id || '-'}</td>
+                <td><span class="value-display value-${data.value}" style="font-size: 1rem; padding: 5px 10px;">${data.value}</span></td>
+                <td>${data.arduino_timestamp || '-'}</td>
+                <td>${new Date(data.server_timestamp).toLocaleString('ko-KR')}</td>
+            `;
+            
+            // 20개 이상이면 마지막 행 제거
+            if (tbody.rows.length > 20) {
+                tbody.deleteRow(20);
+            }
+            
+            // recentData 배열 업데이트
+            recentData.unshift(data);
+            if (recentData.length > 20) {
+                recentData.pop();
+            }
+        }
+        
+        // 통계 업데이트
+        async function updateStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('total-records').textContent = stats.total_records || 0;
+                document.getElementById('count-ones').textContent = stats.count_ones || 0;
+                document.getElementById('count-zeros').textContent = stats.count_zeros || 0;
+                
+                if (stats.last_update) {
+                    const date = new Date(stats.last_update);
+                    document.getElementById('last-update').textContent = date.toLocaleTimeString('ko-KR');
+                }
+            } catch (error) {
+                console.error('통계 업데이트 오류:', error);
+            }
+        }
+        
+        // 차트 초기화
+        function initChart() {
+            const ctx = document.getElementById('valueChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: '값',
+                        data: [],
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        tension: 0,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 1,
+                            ticks: {
+                                stepSize: 1
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        // 차트 업데이트
+        function updateChart(data) {
+            if (!chart) {
+                initChart();
+            }
+            
+            const time = new Date(data.server_timestamp).toLocaleTimeString('ko-KR');
+            
+            chart.data.labels.push(time);
+            chart.data.datasets[0].data.push(data.value);
+            
+            // 최대 20개 데이터만 표시
+            if (chart.data.labels.length > 20) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+            
+            chart.update();
+        }
+        
+        // 초기 데이터 로드
+        async function loadInitialData() {
+            try {
+                const response = await fetch('/api/data?limit=20');
+                const data = await response.json();
+                
+                // 테이블 초기화
+                const tbody = document.getElementById('data-tbody');
+                tbody.innerHTML = '';
+                
+                // 데이터를 역순으로 테이블에 추가 (최신이 위로)
+                data.forEach(item => {
+                    const row = tbody.insertRow();
+                    row.innerHTML = `
+                        <td>${item.id}</td>
+                        <td><span class="value-display value-${item.value}" style="font-size: 1rem; padding: 5px 10px;">${item.value}</span></td>
+                        <td>${item.arduino_timestamp || '-'}</td>
+                        <td>${new Date(item.server_timestamp).toLocaleString('ko-KR')}</td>
+                    `;
+                });
+                
+                // 최신 값 표시
+                if (data.length > 0) {
+                    updateCurrentValue(data[0].value);
+                }
+                
+                // 차트 데이터 설정
+                if (!chart) {
+                    initChart();
+                }
+                
+                const chartData = data.reverse().slice(-20);
+                chart.data.labels = chartData.map(d => new Date(d.server_timestamp).toLocaleTimeString('ko-KR'));
+                chart.data.datasets[0].data = chartData.map(d => d.value);
+                chart.update();
+                
+                // 통계 업데이트
+                updateStats();
+                
+            } catch (error) {
+                console.error('초기 데이터 로드 오류:', error);
+            }
+        }
+        
+        // 페이지 로드 시 초기화
+        window.addEventListener('load', () => {
+            initChart();
+        });
+        
+        // 주기적으로 통계 업데이트 (10초마다)
+        setInterval(updateStats, 10000);
+    </script>
+</body>
+</html>
