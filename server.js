@@ -19,24 +19,51 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// MariaDB 연결 풀 생성
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT) || 3306,
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'arduino_data',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+// 데이터베이스 초기화 (데이터베이스 생성 포함)
+async function createDatabaseIfNotExists() {
+  const connection = await mysql.createConnection({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || ''
+  });
 
-// 데이터베이스 초기화
-async function initDatabase() {
+  try {
+    // 데이터베이스 생성
+    await connection.execute(
+      `CREATE DATABASE IF NOT EXISTS ${process.env.DB_NAME || 'arduino_data'}`
+    );
+    console.log(`Database ${process.env.DB_NAME || 'arduino_data'} created or already exists`);
+  } catch (error) {
+    console.error('Error creating database:', error);
+  } finally {
+    await connection.end();
+  }
+}
+
+// MariaDB 연결 풀 생성
+let pool;
+
+async function initializePool() {
+  // 먼저 데이터베이스 생성
+  await createDatabaseIfNotExists();
+  
+  // 그 다음 풀 생성
+  pool = mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'arduino_data',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+  
+  // 테이블 생성
   try {
     const connection = await pool.getConnection();
     
-    // 테이블 생성
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS sensor_data (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -49,26 +76,24 @@ async function initDatabase() {
     `);
     
     connection.release();
-    console.log('Database initialized successfully');
+    console.log('Table initialized successfully');
   } catch (error) {
-    console.error('Database initialization error:', error);
+    console.error('Table initialization error:', error);
   }
 }
 
-// API 엔드포인트
+// API 엔드포인트들... (나머지 코드는 동일)
 
 // Arduino 데이터 수신
 app.post('/api/data', async (req, res) => {
   try {
     const { value, timestamp, pc_timestamp } = req.body;
     
-    // 데이터베이스에 저장
     const [result] = await pool.execute(
       'INSERT INTO sensor_data (value, arduino_timestamp, pc_timestamp) VALUES (?, ?, ?)',
       [value, timestamp, pc_timestamp]
     );
     
-    // 실시간으로 클라이언트에 전송
     io.emit('newData', {
       id: result.insertId,
       value,
@@ -129,8 +154,12 @@ io.on('connection', (socket) => {
 // 서버 시작
 const PORT = process.env.PORT || 3000;
 
-initDatabase().then(() => {
+// 초기화 후 서버 시작
+initializePool().then(() => {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+}).catch(error => {
+  console.error('Failed to initialize:', error);
+  process.exit(1);
 });
